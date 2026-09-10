@@ -137,8 +137,32 @@
         <button class="btn secondary small" id="downloadTemplateBtn">Download blank JSON template</button>
         <input type="file" id="importFileInput" accept="application/json,.json" style="display:none;">
         <button class="btn small" id="chooseFileBtn">Choose JSON file to import</button>
+        <button class="btn secondary small" id="exportImportedBtn">Export imported sets as JSON</button>
       </div>
       <div id="importStatus" style="font-size:0.85rem; margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Load a dataset from a URL (great for GitHub)</h3>
+      <p style="color:var(--muted); font-size:0.9rem; line-height:1.5;">
+        This tool can't reliably save imported data in this browser (see the warning above if it appears). A robust
+        workaround: commit your question file (JSON or .xlsx) to a GitHub repo, then load it here by URL — the file
+        on GitHub becomes your permanent storage instead of the browser. For a public repo, use the
+        <strong>raw</strong> file URL, e.g. <code>https://raw.githubusercontent.com/USER/REPO/main/questions.json</code>.
+        You can also auto-load on page open by visiting
+        <code>this-tool.html?dataUrl=&lt;encoded raw URL&gt;&amp;dataType=json&amp;dataName=Module%204</code> —
+        bookmark that link and the dataset loads automatically every time.
+      </p>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:14px 0;">
+        <input type="text" id="urlSetName" placeholder="Set name, e.g. Module 6" style="min-width:160px; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+        <select id="urlDataType" style="padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+          <option value="json">JSON file</option>
+          <option value="xlsx">Excel file (.xlsx)</option>
+        </select>
+        <input type="text" id="datasetUrlInput" placeholder="https://raw.githubusercontent.com/USER/REPO/main/questions.json" style="flex:1; min-width:260px; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text);">
+        <button class="btn small" id="loadFromUrlBtn">Load</button>
+      </div>
+      <div id="urlImportStatus" style="font-size:0.85rem; margin-top:4px;"></div>
     </div>
 
     <div class="card">
@@ -902,6 +926,103 @@ function setImportStatus(msg, isError) {
   el.style.color = isError ? 'var(--bad)' : 'var(--good)';
 }
 
+function setUrlImportStatus(msg, isError) {
+  const el = document.getElementById('urlImportStatus');
+  el.textContent = msg;
+  el.style.color = isError ? 'var(--bad)' : 'var(--good)';
+}
+
+// Shared: merge a { setName: moduleData, ... } object into QUIZ_DATA/customData/localStorage.
+// Returns a status string describing what happened, plus whether saveCustomData persisted.
+function ingestParsedSets(parsed) {
+  const error = validateImportedData(parsed);
+  if (error) return { ok: false, error };
+
+  const customData = loadCustomData();
+  const modKeys = Object.keys(parsed);
+  const overwritten = modKeys.filter(k => customData[k]);
+  modKeys.forEach(k => { customData[k] = parsed[k]; QUIZ_DATA[k] = parsed[k]; sessionOnlyImports[k] = parsed[k]; });
+  const saved = saveCustomData(customData);
+  const totalQ = modKeys.reduce((s, k) => s + Object.values(parsed[k]).reduce((s2, ch) => s2 + ch.questions.length, 0), 0);
+
+  let msg = `Imported ${modKeys.length} set(s), ${totalQ} question(s).`;
+  if (overwritten.length) msg += ` Overwrote existing set(s): ${overwritten.join(', ')}.`;
+  if (!saved) msg += ' ⚠️ Could not persist to this browser — set is available for this session only.';
+
+  renderImportedList();
+  buildSetupUI();
+  return { ok: true, msg, saved };
+}
+
+// Shared: parse an XLSX workbook (Chapter | Question | Option A-D | Answer columns) into
+// module data keyed by chapter, then hand off to ingestParsedSets.
+function ingestWorkbook(workbook, setName) {
+  const chapterOrder = [];
+  const chapterQuestions = {};
+  let totalQuestions = 0;
+  const sheetIssues = [];
+
+  workbook.SheetNames.forEach(sheetName => {
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+    if (!rows || rows.length < 2) {
+      sheetIssues.push(`Sheet "${sheetName}" has no data rows (skipped).`);
+      return;
+    }
+    const dataRows = rows.slice(1); // skip header row
+    dataRows.forEach((row, rIdx) => {
+      const [chapterRaw, q, optA, optB, optC, optD, answerLetterRaw] = row;
+      if (q === undefined || q === null || String(q).trim() === '') return; // skip blank rows
+
+      const chapter = (chapterRaw === undefined || chapterRaw === null || String(chapterRaw).trim() === '')
+        ? 'General'
+        : String(chapterRaw).trim();
+
+      if ([optA, optB, optC, optD].some(v => v === undefined || v === null || String(v).trim() === '')) {
+        sheetIssues.push(`Sheet "${sheetName}", row ${rIdx + 2}: missing an option in columns C–F — skipped.`);
+        return;
+      }
+      const answerLetter = String(answerLetterRaw || '').trim().toUpperCase();
+      if (!['A', 'B', 'C', 'D'].includes(answerLetter)) {
+        sheetIssues.push(`Sheet "${sheetName}", row ${rIdx + 2}: column G must be A, B, C, or D — skipped.`);
+        return;
+      }
+
+      if (!chapterQuestions[chapter]) {
+        chapterQuestions[chapter] = [];
+        chapterOrder.push(chapter);
+      }
+      chapterQuestions[chapter].push({
+        q: String(q).trim(),
+        options: {
+          A: String(optA).trim(),
+          B: String(optB).trim(),
+          C: String(optC).trim(),
+          D: String(optD).trim()
+        },
+        answer_letter: answerLetter
+      });
+      totalQuestions += 1;
+    });
+  });
+
+  if (!chapterOrder.length) {
+    return { ok: false, error: 'No valid questions found in this file. ' + sheetIssues.join(' ') };
+  }
+
+  const moduleData = {};
+  chapterOrder.forEach((chapterName, idx) => {
+    moduleData[String(idx + 1)] = { title: chapterName, questions: chapterQuestions[chapterName] };
+  });
+
+  const result = ingestParsedSets({ [setName]: moduleData });
+  if (!result.ok) return result;
+  let msg = `Imported "${setName}": ${chapterOrder.length} chapter(s), ${totalQuestions} question(s).`;
+  if (sheetIssues.length) msg += ' Notes: ' + sheetIssues.join(' ');
+  if (!result.saved) msg += ' ⚠️ Could not persist to this browser — set is available for this session only.';
+  return { ok: true, msg, saved: result.saved };
+}
+
 document.getElementById('downloadTemplateBtn').addEventListener('click', () => {
   const template = {
     "My New Set": {
@@ -942,28 +1063,30 @@ document.getElementById('importFileInput').addEventListener('change', (e) => {
       setImportStatus('Could not parse file: invalid JSON. ' + err.message, true);
       return;
     }
-    const error = validateImportedData(parsed);
-    if (error) {
-      setImportStatus('Import failed: ' + error, true);
-      return;
-    }
-    const customData = loadCustomData();
-    const modKeys = Object.keys(parsed);
-    const overwritten = modKeys.filter(k => customData[k]);
-    modKeys.forEach(k => { customData[k] = parsed[k]; QUIZ_DATA[k] = parsed[k]; sessionOnlyImports[k] = parsed[k]; });
-    const saved = saveCustomData(customData);
-    const totalQ = modKeys.reduce((s, k) => s + Object.values(parsed[k]).reduce((s2, ch) => s2 + ch.questions.length, 0), 0);
-    setImportStatus(
-      `Imported ${modKeys.length} set(s), ${totalQ} question(s).` +
-      (overwritten.length ? ` Overwrote existing set(s): ${overwritten.join(', ')}.` : '') +
-      (saved ? '' : ' ⚠️ Could not persist to this browser — set is available for this session only.'),
-      !saved
-    );
-    renderImportedList();
-    buildSetupUI();
+    const result = ingestParsedSets(parsed);
+    if (!result.ok) { setImportStatus('Import failed: ' + result.error, true); return; }
+    setImportStatus(result.msg, !result.saved);
   };
   reader.readAsText(file);
   e.target.value = ''; // allow re-selecting same file later
+});
+
+document.getElementById('exportImportedBtn').addEventListener('click', () => {
+  const customData = loadCustomData();
+  const keys = Object.keys(customData);
+  const exportData = keys.length ? customData : sessionOnlyImports;
+  if (!Object.keys(exportData).length) {
+    setImportStatus('No imported sets to export yet.', true);
+    return;
+  }
+  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'quiz_datasets_export.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  setImportStatus(`Exported ${Object.keys(exportData).length} set(s). Commit this file to your GitHub repo to reuse it later.`, false);
 });
 
 document.getElementById('clearImportsBtn').addEventListener('click', () => {
@@ -1012,92 +1135,81 @@ document.getElementById('importExcelInput').addEventListener('change', (e) => {
       setExcelStatus('Could not read Excel file: ' + err.message, true);
       return;
     }
-
-    // Expected columns: A=Chapter, B=Question, C-F=Option A-D, G=Correct answer (A/B/C/D)
-    const chapterOrder = [];       // preserves first-seen order of chapter names
-    const chapterQuestions = {};   // chapter name -> array of question objects
-    let totalQuestions = 0;
-    const sheetIssues = [];
-
-    workbook.SheetNames.forEach(sheetName => {
-      const sheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
-      if (!rows || rows.length < 2) {
-        sheetIssues.push(`Sheet "${sheetName}" has no data rows (skipped).`);
-        return;
-      }
-      const dataRows = rows.slice(1); // skip header row
-      dataRows.forEach((row, rIdx) => {
-        const [chapterRaw, q, optA, optB, optC, optD, answerLetterRaw] = row;
-        if (q === undefined || q === null || String(q).trim() === '') return; // skip blank rows
-
-        const chapter = (chapterRaw === undefined || chapterRaw === null || String(chapterRaw).trim() === '')
-          ? 'General'
-          : String(chapterRaw).trim();
-
-        if ([optA, optB, optC, optD].some(v => v === undefined || v === null || String(v).trim() === '')) {
-          sheetIssues.push(`Sheet "${sheetName}", row ${rIdx + 2}: missing an option in columns C–F — skipped.`);
-          return;
-        }
-        const answerLetter = String(answerLetterRaw || '').trim().toUpperCase();
-        if (!['A', 'B', 'C', 'D'].includes(answerLetter)) {
-          sheetIssues.push(`Sheet "${sheetName}", row ${rIdx + 2}: column G must be A, B, C, or D — skipped.`);
-          return;
-        }
-
-        if (!chapterQuestions[chapter]) {
-          chapterQuestions[chapter] = [];
-          chapterOrder.push(chapter);
-        }
-        chapterQuestions[chapter].push({
-          q: String(q).trim(),
-          options: {
-            A: String(optA).trim(),
-            B: String(optB).trim(),
-            C: String(optC).trim(),
-            D: String(optD).trim()
-          },
-          answer_letter: answerLetter
-        });
-        totalQuestions += 1;
-      });
-    });
-
-    if (!chapterOrder.length) {
-      setExcelStatus('No valid questions found in this file. ' + sheetIssues.join(' '), true);
-      return;
-    }
-
-    const moduleData = {};
-    chapterOrder.forEach((chapterName, idx) => {
-      moduleData[String(idx + 1)] = { title: chapterName, questions: chapterQuestions[chapterName] };
-    });
-
-    const error = validateImportedData({ [setName]: moduleData });
-    if (error) {
-      setExcelStatus('Import failed: ' + error, true);
-      return;
-    }
-
-    const customData = loadCustomData();
-    const overwritten = !!customData[setName];
-    customData[setName] = moduleData;
-    QUIZ_DATA[setName] = moduleData;
-    sessionOnlyImports[setName] = moduleData;
-    const saved = saveCustomData(customData);
-
-    let msg = `Imported "${setName}": ${chapterOrder.length} chapter(s), ${totalQuestions} question(s).`;
-    if (overwritten) msg += ' Overwrote the existing set with the same name.';
-    if (sheetIssues.length) msg += ' Notes: ' + sheetIssues.join(' ');
-    if (!saved) msg += ' ⚠️ Could not persist to this browser — set is available for this session only.';
-    setExcelStatus(msg, !saved);
-
-    renderImportedList();
-    buildSetupUI();
+    const result = ingestWorkbook(workbook, setName);
+    if (!result.ok) { setExcelStatus('Import failed: ' + result.error, true); return; }
+    setExcelStatus(result.msg, !result.saved);
   };
   reader.readAsArrayBuffer(file);
   e.target.value = '';
 });
+
+// ---------- Load dataset from a URL (e.g. GitHub raw link) ----------
+async function loadDatasetFromUrl(url, type, setName, statusFn) {
+  statusFn(`Fetching ${url} ...`, false);
+  let resp;
+  try {
+    resp = await fetch(url, { cache: 'no-store' });
+  } catch (err) {
+    statusFn('Network error fetching URL (check the URL and CORS — raw.githubusercontent.com works, github.com/.../blob/ links do not): ' + err.message, true);
+    return;
+  }
+  if (!resp.ok) {
+    statusFn(`Fetch failed: HTTP ${resp.status} ${resp.statusText}`, true);
+    return;
+  }
+
+  if (type === 'xlsx') {
+    if (typeof XLSX === 'undefined') {
+      statusFn('Excel support library did not load (needs an internet connection). Try again once online.', true);
+      return;
+    }
+    let workbook;
+    try {
+      const buf = await resp.arrayBuffer();
+      workbook = XLSX.read(new Uint8Array(buf), { type: 'array' });
+    } catch (err) {
+      statusFn('Could not read Excel file: ' + err.message, true);
+      return;
+    }
+    const name = setName || url.split('/').pop().replace(/\.(xlsx|xls)$/i, '');
+    const result = ingestWorkbook(workbook, name);
+    if (!result.ok) { statusFn('Import failed: ' + result.error, true); return; }
+    statusFn(result.msg, !result.saved);
+  } else {
+    let parsed;
+    try {
+      parsed = await resp.json();
+    } catch (err) {
+      statusFn('Could not parse JSON: ' + err.message, true);
+      return;
+    }
+    // If the JSON is a single module's chapter map (no set-name wrapper) and a set name was given, wrap it.
+    const looksWrapped = Object.values(parsed).every(v => v && typeof v === 'object' && !Array.isArray(v) &&
+      Object.values(v).every(ch => ch && typeof ch === 'object' && 'title' in ch && 'questions' in ch));
+    const toImport = (!looksWrapped && setName) ? { [setName]: parsed } : parsed;
+    const result = ingestParsedSets(toImport);
+    if (!result.ok) { statusFn('Import failed: ' + result.error, true); return; }
+    statusFn(result.msg, !result.saved);
+  }
+}
+
+document.getElementById('loadFromUrlBtn').addEventListener('click', () => {
+  const url = document.getElementById('datasetUrlInput').value.trim();
+  const type = document.getElementById('urlDataType').value;
+  const setName = document.getElementById('urlSetName').value.trim();
+  if (!url) { setUrlImportStatus('Enter a URL first.', true); return; }
+  loadDatasetFromUrl(url, type, setName, setUrlImportStatus);
+});
+
+// Auto-load on page open via ?dataUrl=...&dataType=json|xlsx&dataName=... (bookmarkable / shareable link)
+(function autoLoadFromQueryString() {
+  const params = new URLSearchParams(window.location.search);
+  const url = params.get('dataUrl');
+  if (!url) return;
+  const type = params.get('dataType') === 'xlsx' ? 'xlsx' : 'json';
+  const name = params.get('dataName') || '';
+  loadDatasetFromUrl(url, type, name, setUrlImportStatus);
+})();
 
 // ---------- Init ----------
 buildSetupUI();
