@@ -199,6 +199,7 @@
       <div class="flex-between" style="margin-bottom:10px;">
         <h3 style="margin:0;">Datasets</h3>
         <div style="display:flex; gap:8px;">
+          <button class="btn secondary small" id="refreshGithubBtn" title="Re-fetch the configured GitHub question file">Refresh from GitHub</button>
           <button class="btn secondary small" id="datasetsSelectAll">Select all</button>
           <button class="btn secondary small" id="datasetsSelectNone">Select none</button>
         </div>
@@ -206,6 +207,7 @@
       <p style="color:var(--muted); font-size:0.85rem; margin:0 0 10px;">
         Choose which question set(s) to build a quiz from. Only checked datasets appear below and can supply questions.
       </p>
+      <div id="urlImportStatusSetup" style="font-size:0.85rem; margin:0 0 10px;"></div>
       <div id="datasetCheckboxContainer"></div>
     </div>
     <div class="card">
@@ -270,6 +272,18 @@ const QUIZ_DATA = {"1": {"1": {"title": "Introducing Classical AI", "questions":
 <script>
 // ---------- State ----------
 const LS_KEY = 'garpRaiQuizHistory';
+// ============================================================
+// GITHUB-HOSTED QUESTION FILE — EDIT THIS TO POINT AT YOUR REPO
+// ============================================================
+// Set this to the RAW file URL (not the normal github.com page) of your
+// question file, e.g.:
+//   'https://raw.githubusercontent.com/USER/REPO/main/questions.xlsx'
+// Leave it as '' to disable auto-loading from GitHub.
+const GITHUB_DATA_URL = 'https://raw.githubusercontent.com/aiappdeveloper26/RAI_quiz/main/GARP_Quiz.xlsx';
+const GITHUB_DATA_TYPE = 'xlsx'; // 'xlsx' or 'json'
+const GITHUB_DATA_NAME = 'GitHub Questions'; // dataset name shown in Build Quiz
+// ============================================================
+
 const CUSTOM_DATA_LS_KEY = 'garpRaiCustomQuizData';
 let selection = {}; // {moduleNum: {chapterNum: qty}}
 let currentQuiz = null; // {questions: [...], answers: {idx: letter}, startedAt}
@@ -927,9 +941,11 @@ function setImportStatus(msg, isError) {
 }
 
 function setUrlImportStatus(msg, isError) {
-  const el = document.getElementById('urlImportStatus');
-  el.textContent = msg;
-  el.style.color = isError ? 'var(--bad)' : 'var(--good)';
+  const color = isError ? 'var(--bad)' : 'var(--good)';
+  ['urlImportStatus', 'urlImportStatusSetup'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.textContent = msg; el.style.color = color; }
+  });
 }
 
 // Shared: merge a { setName: moduleData, ... } object into QUIZ_DATA/customData/localStorage.
@@ -1145,10 +1161,12 @@ document.getElementById('importExcelInput').addEventListener('change', (e) => {
 
 // ---------- Load dataset from a URL (e.g. GitHub raw link) ----------
 async function loadDatasetFromUrl(url, type, setName, statusFn) {
+  // Cache-bust so a recently-updated GitHub file isn't served stale from CDN/browser cache.
+  const bustUrl = url + (url.includes('?') ? '&' : '?') + '_cb=' + Date.now();
   statusFn(`Fetching ${url} ...`, false);
   let resp;
   try {
-    resp = await fetch(url, { cache: 'no-store' });
+    resp = await fetch(bustUrl, { cache: 'no-store' });
   } catch (err) {
     statusFn('Network error fetching URL (check the URL and CORS — raw.githubusercontent.com works, github.com/.../blob/ links do not): ' + err.message, true);
     return;
@@ -1201,18 +1219,31 @@ document.getElementById('loadFromUrlBtn').addEventListener('click', () => {
   loadDatasetFromUrl(url, type, setName, setUrlImportStatus);
 });
 
-// Auto-load on page open via ?dataUrl=...&dataType=json|xlsx&dataName=... (bookmarkable / shareable link)
-(function autoLoadFromQueryString() {
+// Auto-load on page open via ?dataUrl=...&dataType=json|xlsx&dataName=... (bookmarkable / shareable link),
+// OR from the hardcoded GITHUB_DATA_URL config above (always loads on open, no query string needed).
+(function autoLoadDataset() {
   const params = new URLSearchParams(window.location.search);
-  const url = params.get('dataUrl');
-  if (!url) return;
-  const type = params.get('dataType') === 'xlsx' ? 'xlsx' : 'json';
-  const name = params.get('dataName') || '';
-  loadDatasetFromUrl(url, type, name, setUrlImportStatus);
+  const qsUrl = params.get('dataUrl');
+  if (qsUrl) {
+    const type = params.get('dataType') === 'xlsx' ? 'xlsx' : 'json';
+    const name = params.get('dataName') || '';
+    loadDatasetFromUrl(qsUrl, type, name, setUrlImportStatus);
+  } else if (GITHUB_DATA_URL) {
+    loadDatasetFromUrl(GITHUB_DATA_URL, GITHUB_DATA_TYPE, GITHUB_DATA_NAME, setUrlImportStatus);
+  }
 })();
+
+document.getElementById('refreshGithubBtn')?.addEventListener('click', () => {
+  if (!GITHUB_DATA_URL) return;
+  loadDatasetFromUrl(GITHUB_DATA_URL, GITHUB_DATA_TYPE, GITHUB_DATA_NAME, setUrlImportStatus);
+});
 
 // ---------- Init ----------
 buildSetupUI();
+if (!GITHUB_DATA_URL) {
+  const btn = document.getElementById('refreshGithubBtn');
+  if (btn) btn.style.display = 'none';
+}
 
 </script>
 </body>
