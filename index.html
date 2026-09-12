@@ -970,13 +970,30 @@ function ingestParsedSets(parsed) {
   return { ok: true, msg, saved };
 }
 
-// Shared: parse an XLSX workbook (Chapter | Question | Option A-D | Answer columns) into
-// module data keyed by chapter, then hand off to ingestParsedSets.
+// Shared: parse an XLSX workbook into module data, then hand off to ingestParsedSets.
+//
+// Supports two column layouts, detected from the header row of each sheet:
+//   7 columns: Chapter | Question | Option A-D | Answer      -> everything goes into `setName`
+//   8 columns: Module | Chapter | Question | Option A-D | Answer -> rows are grouped into a
+//              separate set per distinct Module value (e.g. the "All Questions" tab produced
+//              by combining several quizzes), ignoring `setName` for those rows.
+// Column matching is done by header text (case-insensitive, so header order/wording like
+// "Option A" vs "A" or "Correct Answer" vs "Answer" both work), falling back to position.
 function ingestWorkbook(workbook, setName) {
-  const chapterOrder = [];
-  const chapterQuestions = {};
+  // setKey -> chapterName -> array of question objects (insertion order preserved via chapterOrderBySet)
+  const setsData = {};
+  const chapterOrderBySet = {};
   let totalQuestions = 0;
   const sheetIssues = [];
+
+  const norm = s => String(s || '').trim().toLowerCase();
+
+  function findCol(headerRow, candidates) {
+    for (let i = 0; i < headerRow.length; i++) {
+      if (candidates.includes(norm(headerRow[i]))) return i;
+    }
+    return -1;
+  }
 
   workbook.SheetNames.forEach(sheetName => {
     const sheet = workbook.Sheets[sheetName];
@@ -985,30 +1002,62 @@ function ingestWorkbook(workbook, setName) {
       sheetIssues.push(`Sheet "${sheetName}" has no data rows (skipped).`);
       return;
     }
-    const dataRows = rows.slice(1); // skip header row
+    const headerRow = rows[0];
+    const dataRows = rows.slice(1);
+
+    const moduleCol = findCol(headerRow, ['module', 'set', 'quiz', 'source module']);
+    let chapterCol = findCol(headerRow, ['chapter', 'chapter name']);
+    let qCol = findCol(headerRow, ['question']);
+    let aCol = findCol(headerRow, ['option a', 'a']);
+    let bCol = findCol(headerRow, ['option b', 'b']);
+    let cCol = findCol(headerRow, ['option c', 'c']);
+    let dCol = findCol(headerRow, ['option d', 'd']);
+    let ansCol = findCol(headerRow, ['correct answer', 'answer']);
+
+    // Fall back to positional layout if header text wasn't recognized.
+    const hasModuleCol = moduleCol !== -1;
+    if (chapterCol === -1 || qCol === -1 || aCol === -1 || bCol === -1 || cCol === -1 || dCol === -1 || ansCol === -1) {
+      if (hasModuleCol) {
+        // 8-column layout: Module, Chapter, Question, A, B, C, D, Answer
+        [chapterCol, qCol, aCol, bCol, cCol, dCol, ansCol] = [1, 2, 3, 4, 5, 6, 7];
+      } else {
+        // 7-column layout: Chapter, Question, A, B, C, D, Answer
+        [chapterCol, qCol, aCol, bCol, cCol, dCol, ansCol] = [0, 1, 2, 3, 4, 5, 6];
+      }
+    }
+
     dataRows.forEach((row, rIdx) => {
-      const [chapterRaw, q, optA, optB, optC, optD, answerLetterRaw] = row;
+      const q = row[qCol];
       if (q === undefined || q === null || String(q).trim() === '') return; // skip blank rows
 
+      const chapterRaw = row[chapterCol];
       const chapter = (chapterRaw === undefined || chapterRaw === null || String(chapterRaw).trim() === '')
         ? 'General'
         : String(chapterRaw).trim();
 
+      const setKey = hasModuleCol
+        ? (row[moduleCol] === undefined || row[moduleCol] === null || String(row[moduleCol]).trim() === ''
+            ? setName
+            : String(row[moduleCol]).trim())
+        : setName;
+
+      const optA = row[aCol], optB = row[bCol], optC = row[cCol], optD = row[dCol];
       if ([optA, optB, optC, optD].some(v => v === undefined || v === null || String(v).trim() === '')) {
-        sheetIssues.push(`Sheet "${sheetName}", row ${rIdx + 2}: missing an option in columns C–F — skipped.`);
+        sheetIssues.push(`Sheet "${sheetName}", row ${rIdx + 2}: missing an option value — skipped.`);
         return;
       }
-      const answerLetter = String(answerLetterRaw || '').trim().toUpperCase();
+      const answerLetter = String(row[ansCol] || '').trim().toUpperCase();
       if (!['A', 'B', 'C', 'D'].includes(answerLetter)) {
-        sheetIssues.push(`Sheet "${sheetName}", row ${rIdx + 2}: column G must be A, B, C, or D — skipped.`);
+        sheetIssues.push(`Sheet "${sheetName}", row ${rIdx + 2}: answer column must be A, B, C, or D — skipped.`);
         return;
       }
 
-      if (!chapterQuestions[chapter]) {
-        chapterQuestions[chapter] = [];
-        chapterOrder.push(chapter);
+      if (!setsData[setKey]) { setsData[setKey] = {}; chapterOrderBySet[setKey] = []; }
+      if (!setsData[setKey][chapter]) {
+        setsData[setKey][chapter] = [];
+        chapterOrderBySet[setKey].push(chapter);
       }
-      chapterQuestions[chapter].push({
+      setsData[setKey][chapter].push({
         q: String(q).trim(),
         options: {
           A: String(optA).trim(),
@@ -1022,18 +1071,27 @@ function ingestWorkbook(workbook, setName) {
     });
   });
 
-  if (!chapterOrder.length) {
+  const setKeys = Object.keys(setsData);
+  if (!setKeys.length) {
     return { ok: false, error: 'No valid questions found in this file. ' + sheetIssues.join(' ') };
   }
 
-  const moduleData = {};
-  chapterOrder.forEach((chapterName, idx) => {
-    moduleData[String(idx + 1)] = { title: chapterName, questions: chapterQuestions[chapterName] };
+  const toImport = {};
+  let totalChapters = 0;
+  setKeys.forEach(setKey => {
+    const moduleData = {};
+    chapterOrderBySet[setKey].forEach((chapterName, idx) => {
+      moduleData[String(idx + 1)] = { title: chapterName, questions: setsData[setKey][chapterName] };
+    });
+    toImport[setKey] = moduleData;
+    totalChapters += chapterOrderBySet[setKey].length;
   });
 
-  const result = ingestParsedSets({ [setName]: moduleData });
+  const result = ingestParsedSets(toImport);
   if (!result.ok) return result;
-  let msg = `Imported "${setName}": ${chapterOrder.length} chapter(s), ${totalQuestions} question(s).`;
+  let msg = setKeys.length > 1
+    ? `Imported ${setKeys.length} set(s) from the Module column (${setKeys.join(', ')}): ${totalChapters} chapter(s), ${totalQuestions} question(s) total.`
+    : `Imported "${setKeys[0]}": ${totalChapters} chapter(s), ${totalQuestions} question(s).`;
   if (sheetIssues.length) msg += ' Notes: ' + sheetIssues.join(' ');
   if (!result.saved) msg += ' ⚠️ Could not persist to this browser — set is available for this session only.';
   return { ok: true, msg, saved: result.saved };
