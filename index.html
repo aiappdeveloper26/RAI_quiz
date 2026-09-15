@@ -132,8 +132,32 @@
     <button class="tab-btn" data-tab="quiz" id="quizTabBtn" style="display:none;">Quiz</button>
     <button class="tab-btn" data-tab="results" id="resultsTabBtn" style="display:none;">Results</button>
     <button class="tab-btn" data-tab="history">History</button>
+    <button class="tab-btn" data-tab="review">Review</button>
     <button class="tab-btn" data-tab="cheatsheet">Cheat Sheet</button>
     <button class="tab-btn" data-tab="import">Import Questions</button>
+  </div>
+
+  <!-- REVIEW SCREEN -->
+  <div class="screen" id="screen-review">
+    <div class="card">
+      <div class="flex-between" style="margin-bottom:8px; flex-wrap:wrap; gap:8px;">
+        <h3 style="margin:0;">🔍 Review Unanswered &amp; Incorrect</h3>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <select id="reviewScope" style="padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
+            <option value="combined">All attempts (combined)</option>
+          </select>
+          <select id="reviewFilter" style="padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
+            <option value="all">Incorrect + Unanswered</option>
+            <option value="incorrect">Incorrect only</option>
+            <option value="unanswered">Unanswered only</option>
+          </select>
+        </div>
+      </div>
+      <p style="color:var(--muted);font-size:0.88rem;margin:0;">
+        "All attempts (combined)" shows each question once, using its most recent outcome. Pick a specific attempt from the dropdown to review just that quiz.
+      </p>
+    </div>
+    <div id="reviewContainer"></div>
   </div>
 
   <!-- CHEAT SHEET SCREEN -->
@@ -595,16 +619,141 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     if (btn.dataset.tab === 'history') renderHistory();
     if (btn.dataset.tab === 'import') renderImportedList();
     if (btn.dataset.tab === 'cheatsheet') renderCheatSheet();
+    if (btn.dataset.tab === 'review') renderReviewTab();
     showScreen(btn.dataset.tab);
   });
 });
 
-// ---------- Cheat Sheet ----------
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// ---------- Review (unanswered & incorrect) ----------
+function populateReviewScopeOptions() {
+  const hist = loadHistory();
+  const sel = document.getElementById('reviewScope');
+  const prevValue = sel.value;
+  sel.innerHTML = '<option value="combined">All attempts (combined)</option>' +
+    hist.map((r, idx) => {
+      const d = new Date(r.date);
+      return `<option value="${idx}">${d.toLocaleString()} — ${r.correct}/${r.total} (${r.pct}%)</option>`;
+    }).join('');
+  // Restore previous selection if still valid, else default to combined
+  const validValues = Array.from(sel.options).map(o => o.value);
+  sel.value = validValues.includes(prevValue) ? prevValue : 'combined';
 }
 
-function highlightMatch(text, query) {
+function getReviewQuestions(scope) {
+  const hist = loadHistory();
+  if (!hist.length) return [];
+
+  if (scope === 'combined') {
+    // Dedupe by module+chapter+question text, keeping the MOST RECENT occurrence's outcome
+    // (hist is stored newest-first via unshift, so first occurrence found is most recent).
+    const seen = new Map();
+    hist.forEach((r, rIdx) => {
+      (r.questionDetails || []).forEach(q => {
+        const key = q.module + '|' + q.chapter + '|' + q.text;
+        if (!seen.has(key)) {
+          seen.set(key, { ...q, attemptDate: r.date, attemptIdx: rIdx });
+        }
+      });
+    });
+    return Array.from(seen.values());
+  }
+
+  const idx = parseInt(scope, 10);
+  const r = hist[idx];
+  if (!r) return [];
+  return (r.questionDetails || []).map(q => ({ ...q, attemptDate: r.date, attemptIdx: idx }));
+}
+
+function renderReviewQuestionCard(q) {
+  const chosen = q.chosenIdx;
+  const wasAnswered = chosen !== null && chosen !== undefined;
+  const statusBadge = !wasAnswered
+    ? '<span class="badge" style="background:rgba(234,179,8,0.25);color:#eab308;">Not answered</span>'
+    : '<span class="badge bad">Incorrect</span>';
+
+  const optsHtml = q.options.map((opt, oIdx) => {
+    let cls = 'opt-row';
+    if (opt.isCorrect) cls += ' correct';
+    else if (oIdx === chosen && !opt.isCorrect) cls += ' incorrect';
+    const tag = opt.isCorrect ? '  ✓' : (oIdx === chosen ? '  ✗ (your answer)' : '');
+    return `<div class="${cls}">${escapeHtml(opt.text)}${tag}</div>`;
+  }).join('');
+
+  const dateStr = q.attemptDate ? new Date(q.attemptDate).toLocaleDateString() : '';
+
+  return `
+    <div class="q-block card">
+      <div class="q-meta">Module ${q.module} · Chapter ${q.chapter}: ${escapeHtml(q.chapterTitle)} ${dateStr ? '· ' + dateStr : ''}</div>
+      <div class="q-title">${escapeHtml(q.text)} ${statusBadge}</div>
+      ${optsHtml}
+    </div>
+  `;
+}
+
+function renderReviewTab() {
+  populateReviewScopeOptions();
+  const container = document.getElementById('reviewContainer');
+  const hist = loadHistory();
+
+  if (!hist.length) {
+    container.innerHTML = '<div class="empty-state">No quiz attempts recorded yet. Take a quiz first, then come back here to review what you missed.</div>';
+    return;
+  }
+
+  const scope = document.getElementById('reviewScope').value;
+  const filter = document.getElementById('reviewFilter').value;
+
+  let questions = getReviewQuestions(scope);
+
+  const unansweredQs = questions.filter(q => q.chosenIdx === null || q.chosenIdx === undefined);
+  const incorrectQs = questions.filter(q => !(q.chosenIdx === null || q.chosenIdx === undefined) && !q.isCorrect);
+
+  let toShow = [];
+  if (filter === 'unanswered') toShow = unansweredQs;
+  else if (filter === 'incorrect') toShow = incorrectQs;
+  else toShow = [...unansweredQs, ...incorrectQs];
+
+  const summaryHtml = `
+    <div class="card" style="margin-bottom:14px; display:flex; gap:24px; flex-wrap:wrap;">
+      <div><div style="font-size:1.4rem; font-weight:700;">${unansweredQs.length}</div><div style="color:var(--muted); font-size:0.8rem;">Not answered</div></div>
+      <div><div style="font-size:1.4rem; font-weight:700; color:#ef4444;">${incorrectQs.length}</div><div style="color:var(--muted); font-size:0.8rem;">Incorrect</div></div>
+      <div><div style="font-size:1.4rem; font-weight:700;">${toShow.length}</div><div style="color:var(--muted); font-size:0.8rem;">Showing now</div></div>
+    </div>
+  `;
+
+  if (!toShow.length) {
+    container.innerHTML = summaryHtml + '<div class="empty-state">Nothing to review here — nice work! 🎉</div>';
+    return;
+  }
+
+  // Group by module/chapter for readability
+  const groups = {};
+  const groupOrder = [];
+  toShow.forEach(q => {
+    const key = `M${q.module}-C${q.chapter}`;
+    if (!groups[key]) {
+      groups[key] = { title: `Module ${q.module} · Chapter ${q.chapter}: ${q.chapterTitle}`, items: [] };
+      groupOrder.push(key);
+    }
+    groups[key].items.push(q);
+  });
+
+  const groupsHtml = groupOrder.map(key => {
+    const g = groups[key];
+    return `
+      <div style="margin:18px 0 8px; font-weight:600; font-size:0.9rem; color:var(--muted);">${escapeHtml(g.title)} (${g.items.length})</div>
+      ${g.items.map(renderReviewQuestionCard).join('')}
+    `;
+  }).join('');
+
+  container.innerHTML = summaryHtml + groupsHtml;
+}
+
+document.getElementById('reviewScope').addEventListener('change', renderReviewTab);
+document.getElementById('reviewFilter').addEventListener('change', renderReviewTab);
+
+// ---------- Cheat Sheet ----------
+function renderCheatSheet(filterText) {
   const safe = escapeHtml(text);
   if (!query) return safe;
   const q = query.trim();
