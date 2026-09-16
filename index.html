@@ -120,6 +120,29 @@
   .cs-caret{transition:transform 0.15s ease;color:var(--muted);}
   .cs-caret.rot{transform:rotate(90deg);}
   .cs-hidden{display:none !important;}
+  .fc-wrap{display:flex; flex-direction:column; align-items:center; gap:14px; padding:10px 0;}
+  .fc-progress{color:var(--muted); font-size:0.85rem;}
+  .fc-card{
+    width:100%; max-width:560px; min-height:240px; perspective:1200px; cursor:pointer;
+  }
+  .fc-card-inner{
+    position:relative; width:100%; height:100%; min-height:240px; text-align:left;
+    transition:transform 0.5s; transform-style:preserve-3d;
+  }
+  .fc-card.flipped .fc-card-inner{ transform:rotateY(180deg); }
+  .fc-face{
+    position:absolute; inset:0; backface-visibility:hidden; border-radius:12px;
+    background:var(--panel); border:1px solid var(--border); padding:22px;
+    display:flex; flex-direction:column; justify-content:center; overflow-y:auto;
+  }
+  .fc-face-back{ transform:rotateY(180deg); }
+  .fc-face-label{ font-size:0.72rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:8px; }
+  .fc-face-title{ font-size:1.05rem; font-weight:700; }
+  .fc-face-sub{ color:var(--muted); font-size:0.82rem; margin-top:4px; }
+  .fc-face ul{ margin:0; padding-left:20px; }
+  .fc-face li{ margin-bottom:8px; font-size:0.86rem; line-height:1.45; }
+  .fc-controls{ display:flex; gap:10px; align-items:center; }
+  .fc-hint{ color:var(--muted); font-size:0.78rem; }
 </style>
 </head>
 <body>
@@ -133,8 +156,18 @@
     <button class="tab-btn" data-tab="results" id="resultsTabBtn" style="display:none;">Results</button>
     <button class="tab-btn" data-tab="history">History</button>
     <button class="tab-btn" data-tab="review">Review</button>
+    <button class="tab-btn" data-tab="progress">Progress</button>
     <button class="tab-btn" data-tab="cheatsheet">Cheat Sheet</button>
     <button class="tab-btn" data-tab="import">Import Questions</button>
+  </div>
+
+  <!-- PROGRESS SCREEN -->
+  <div class="screen" id="screen-progress">
+    <div class="card">
+      <h3 style="margin:0 0 6px;">📊 Chapter Mastery</h3>
+      <p style="color:var(--muted); font-size:0.85rem; margin:0;">Accuracy per chapter, based on the most recent time you answered each question across all quiz attempts.</p>
+    </div>
+    <div id="progressContainer"></div>
   </div>
 
   <!-- REVIEW SCREEN -->
@@ -163,13 +196,17 @@
   <!-- CHEAT SHEET SCREEN -->
   <div class="screen" id="screen-cheatsheet">
     <div class="card">
-      <div class="flex-between" style="margin-bottom:8px;">
+      <div class="flex-between" style="margin-bottom:8px; flex-wrap:wrap; gap:8px;">
         <h3 style="margin:0;">📚 Study Cheat Sheet</h3>
-        <input type="text" id="cheatsheetSearch" placeholder="Search notes..." style="padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);min-width:180px;">
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <input type="text" id="cheatsheetSearch" placeholder="Search notes..." style="padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);min-width:180px;">
+          <button class="btn secondary small" id="cheatsheetModeToggle">🔀 Flashcard mode</button>
+        </div>
       </div>
       <p style="color:var(--muted);font-size:0.88rem;margin:0 0 4px;">Condensed summary notes for every module and chapter — a quick review before you quiz yourself.</p>
     </div>
     <div id="cheatsheetContainer"></div>
+    <div id="flashcardContainer" style="display:none;"></div>
   </div>
 
   <!-- IMPORT SCREEN -->
@@ -258,6 +295,15 @@
 
   <!-- SETUP SCREEN -->
   <div class="screen active" id="screen-setup">
+    <div class="card" id="weakAreasCard" style="display:none;">
+      <div class="flex-between" style="flex-wrap:wrap; gap:10px;">
+        <div>
+          <h3 style="margin:0 0 4px;">🎯 Focus on Weak Areas</h3>
+          <p style="color:var(--muted); font-size:0.85rem; margin:0;" id="weakAreasSummary">Loading…</p>
+        </div>
+        <button class="btn" id="startWeakAreasBtn">Start Weak-Areas Quiz</button>
+      </div>
+    </div>
     <div class="card" id="datasetPickerCard">
       <div class="flex-between" style="margin-bottom:10px;">
         <h3 style="margin:0;">Datasets</h3>
@@ -616,10 +662,12 @@ function showScreen(name) {
 }
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
+    if (btn.dataset.tab === 'setup') refreshWeakAreasCard();
     if (btn.dataset.tab === 'history') renderHistory();
     if (btn.dataset.tab === 'import') renderImportedList();
     if (btn.dataset.tab === 'cheatsheet') renderCheatSheet();
     if (btn.dataset.tab === 'review') renderReviewTab();
+    if (btn.dataset.tab === 'progress') renderProgressTab();
     showScreen(btn.dataset.tab);
   });
 });
@@ -721,8 +769,50 @@ function renderReviewTab() {
     </div>
   `;
 
+  // Breakdown of unanswered questions by Module -> Chapter, always shown when any exist,
+  // so it's immediately clear which chapters/modules still have gaps.
+  let unansweredBreakdownHtml = '';
+  if (unansweredQs.length) {
+    const byModule = {};
+    const moduleOrder = [];
+    unansweredQs.forEach(q => {
+      if (!byModule[q.module]) { byModule[q.module] = {}; moduleOrder.push(q.module); }
+      const chKey = q.chapter;
+      if (!byModule[q.module][chKey]) {
+        byModule[q.module][chKey] = { title: q.chapterTitle, count: 0 };
+      }
+      byModule[q.module][chKey].count++;
+    });
+    moduleOrder.sort((a, b) => Number(a) - Number(b));
+
+    const rows = moduleOrder.map(modKey => {
+      const chapters = byModule[modKey];
+      const chKeys = Object.keys(chapters).sort((a, b) => Number(a) - Number(b));
+      const chapterLines = chKeys.map(chKey =>
+        `<div style="display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid var(--border);">
+          <span>Ch ${chKey}: ${escapeHtml(chapters[chKey].title)}</span>
+          <span style="color:var(--muted); white-space:nowrap; margin-left:12px;">${chapters[chKey].count} unanswered</span>
+        </div>`
+      ).join('');
+      const moduleTotal = chKeys.reduce((sum, k) => sum + chapters[k].count, 0);
+      return `
+        <div style="margin-bottom:12px;">
+          <div style="font-weight:600; margin-bottom:4px;">Module ${modKey} <span style="color:var(--muted); font-weight:400; font-size:0.82rem;">(${moduleTotal} unanswered)</span></div>
+          ${chapterLines}
+        </div>
+      `;
+    }).join('');
+
+    unansweredBreakdownHtml = `
+      <div class="card" style="margin-bottom:14px;">
+        <h4 style="margin:0 0 10px;">📋 Unanswered questions — by module &amp; chapter</h4>
+        ${rows}
+      </div>
+    `;
+  }
+
   if (!toShow.length) {
-    container.innerHTML = summaryHtml + '<div class="empty-state">Nothing to review here — nice work! 🎉</div>';
+    container.innerHTML = summaryHtml + unansweredBreakdownHtml + '<div class="empty-state">Nothing to review here — nice work! 🎉</div>';
     return;
   }
 
@@ -746,14 +836,14 @@ function renderReviewTab() {
     `;
   }).join('');
 
-  container.innerHTML = summaryHtml + groupsHtml;
+  container.innerHTML = summaryHtml + unansweredBreakdownHtml + groupsHtml;
 }
 
 document.getElementById('reviewScope').addEventListener('change', renderReviewTab);
 document.getElementById('reviewFilter').addEventListener('change', renderReviewTab);
 
 // ---------- Cheat Sheet ----------
-function renderCheatSheet(filterText) {
+function highlightMatch(text, query) {
   const safe = escapeHtml(text);
   if (!query) return safe;
   const q = query.trim();
@@ -914,6 +1004,31 @@ function renderQuiz() {
       radio.addEventListener('change', () => {
         currentQuiz.answers[idx] = oIdx;
         updateAnsweredCount();
+        // Immediate feedback: reveal correctness for this question right away.
+        const allRows = block.querySelectorAll('.opt-row');
+        allRows.forEach((r, i) => {
+          r.classList.remove('correct', 'incorrect');
+          const o = q.options[i];
+          if (o.isCorrect) r.classList.add('correct');
+          else if (i === oIdx) r.classList.add('incorrect');
+        });
+        let fb = block.querySelector('.q-feedback');
+        if (!fb) {
+          fb = document.createElement('div');
+          fb.className = 'q-feedback';
+          fb.style.cssText = 'margin-top:8px; padding:8px 10px; border-radius:8px; font-size:0.85rem;';
+          block.appendChild(fb);
+        }
+        const correctOpt = q.options.find(o => o.isCorrect);
+        if (opt.isCorrect) {
+          fb.style.background = 'rgba(34,197,94,0.15)';
+          fb.style.color = '#22c55e';
+          fb.textContent = '✓ Correct!';
+        } else {
+          fb.style.background = 'rgba(239,68,68,0.15)';
+          fb.style.color = '#ef4444';
+          fb.textContent = `✗ Not quite. Correct answer: ${correctOpt ? correctOpt.text : ''}`;
+        }
       });
       const span = document.createElement('span');
       span.textContent = opt.text;
@@ -1588,8 +1703,228 @@ document.getElementById('refreshGithubBtn')?.addEventListener('click', () => {
   loadDatasetFromUrl(GITHUB_DATA_URL, GITHUB_DATA_TYPE, GITHUB_DATA_NAME, setUrlImportStatus);
 });
 
+// ---------- Weak Areas Quiz ----------
+function refreshWeakAreasCard() {
+  const card = document.getElementById('weakAreasCard');
+  const summary = document.getElementById('weakAreasSummary');
+  const hist = loadHistory();
+  if (!hist.length) { card.style.display = 'none'; return; }
+
+  const pool = getReviewQuestions('combined').filter(q =>
+    (q.chosenIdx === null || q.chosenIdx === undefined) || !q.isCorrect
+  );
+  if (!pool.length) { card.style.display = 'none'; return; }
+
+  card.style.display = 'block';
+  const unansweredN = pool.filter(q => q.chosenIdx === null || q.chosenIdx === undefined).length;
+  const incorrectN = pool.length - unansweredN;
+  summary.textContent = `${pool.length} question(s) to review — ${incorrectN} missed, ${unansweredN} unanswered, drawn from your quiz history.`;
+}
+
+document.getElementById('startWeakAreasBtn').addEventListener('click', () => {
+  const pool = getReviewQuestions('combined').filter(q =>
+    (q.chosenIdx === null || q.chosenIdx === undefined) || !q.isCorrect
+  );
+  if (!pool.length) return;
+
+  const questions = shuffle(pool.map(q => ({
+    module: q.module,
+    chapter: q.chapter,
+    chapterTitle: q.chapterTitle,
+    text: q.text,
+    options: q.options.map(o => ({ text: o.text, isCorrect: o.isCorrect }))
+  })));
+
+  currentQuiz = { questions, answers: {} };
+  quizStartTime = Date.now();
+  renderQuiz();
+  document.getElementById('quizTabBtn').style.display = 'inline-block';
+  document.getElementById('resultsTabBtn').style.display = 'none';
+  showScreen('quiz');
+});
+
+// ---------- Progress (chapter mastery) ----------
+function renderProgressTab() {
+  const container = document.getElementById('progressContainer');
+  const hist = loadHistory();
+  if (!hist.length) {
+    container.innerHTML = '<div class="empty-state">No quiz attempts yet. Take a quiz to start tracking your mastery by chapter.</div>';
+    return;
+  }
+
+  // Dedup by question (module|chapter|text), keeping most recent outcome — same approach as Review tab.
+  const seen = new Map();
+  hist.forEach(r => {
+    (r.questionDetails || []).forEach(q => {
+      const key = q.module + '|' + q.chapter + '|' + q.text;
+      if (!seen.has(key)) seen.set(key, q);
+    });
+  });
+
+  const stats = {}; // "M-C" -> { module, chapter, title, total, correct, unanswered }
+  const order = [];
+  seen.forEach(q => {
+    const key = `M${q.module}-C${q.chapter}`;
+    if (!stats[key]) {
+      stats[key] = { module: q.module, chapter: q.chapter, title: q.chapterTitle, total: 0, correct: 0, unanswered: 0 };
+      order.push(key);
+    }
+    const s = stats[key];
+    s.total++;
+    const wasAnswered = !(q.chosenIdx === null || q.chosenIdx === undefined);
+    if (!wasAnswered) s.unanswered++;
+    else if (q.isCorrect) s.correct++;
+  });
+
+  order.sort((a, b) => {
+    const sa = stats[a], sb = stats[b];
+    if (Number(sa.module) !== Number(sb.module)) return Number(sa.module) - Number(sb.module);
+    return Number(sa.chapter) - Number(sb.chapter);
+  });
+
+  // Group by module for display, with a module-level rollup.
+  const byModule = {};
+  const moduleOrder = [];
+  order.forEach(key => {
+    const s = stats[key];
+    if (!byModule[s.module]) { byModule[s.module] = []; moduleOrder.push(s.module); }
+    byModule[s.module].push(s);
+  });
+
+  const pctColor = pct => pct >= 80 ? '#22c55e' : (pct >= 50 ? '#eab308' : '#ef4444');
+
+  const html = moduleOrder.map(modKey => {
+    const chapters = byModule[modKey];
+    const modTotal = chapters.reduce((a, c) => a + c.total, 0);
+    const modCorrect = chapters.reduce((a, c) => a + c.correct, 0);
+    const modPct = modTotal ? Math.round((modCorrect / modTotal) * 100) : 0;
+
+    const rows = chapters.map(c => {
+      const answered = c.total - c.unanswered;
+      const pct = answered ? Math.round((c.correct / answered) * 100) : 0;
+      const color = pctColor(pct);
+      return `
+        <div style="margin-bottom:12px;">
+          <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px;">
+            <span style="font-size:0.88rem;">Ch ${c.chapter}: ${escapeHtml(c.title)}</span>
+            <span style="font-size:0.82rem; color:var(--muted);">${c.correct}/${answered} correct${c.unanswered ? ` · ${c.unanswered} unanswered` : ''}</span>
+          </div>
+          <div style="background:var(--panel2); border-radius:6px; height:8px; overflow:hidden;">
+            <div style="width:${pct}%; height:100%; background:${color};"></div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div class="card" style="margin-bottom:14px;">
+        <div class="flex-between" style="margin-bottom:10px;">
+          <h4 style="margin:0;">Module ${modKey}</h4>
+          <span style="font-weight:700; color:${pctColor(modPct)};">${modPct}% mastery</span>
+        </div>
+        ${rows}
+      </div>
+    `;
+  }).join('');
+
+  container.innerHTML = html;
+}
+
+// ---------- Cheat Sheet: Flashcard mode ----------
+let flashcardState = { cards: [], idx: 0, flipped: false };
+
+function buildFlashcardDeck() {
+  const cards = [];
+  Object.keys(CHEATSHEET_DATA).sort((a, b) => Number(a) - Number(b)).forEach(modKey => {
+    const mod = CHEATSHEET_DATA[modKey];
+    Object.keys(mod.chapters).sort((a, b) => Number(a) - Number(b)).forEach(chKey => {
+      const ch = mod.chapters[chKey];
+      cards.push({
+        moduleTitle: mod.title,
+        chapterLabel: `Ch ${chKey}: ${ch.title}`,
+        points: ch.points
+      });
+    });
+  });
+  return cards;
+}
+
+function renderFlashcard() {
+  const container = document.getElementById('flashcardContainer');
+  if (!flashcardState.cards.length) flashcardState.cards = buildFlashcardDeck();
+  const card = flashcardState.cards[flashcardState.idx];
+  if (!card) { container.innerHTML = '<div class="empty-state">No cards available.</div>'; return; }
+
+  container.innerHTML = `
+    <div class="fc-wrap">
+      <div class="fc-progress">Card ${flashcardState.idx + 1} of ${flashcardState.cards.length} — ${escapeHtml(card.moduleTitle)}</div>
+      <div class="fc-card ${flashcardState.flipped ? 'flipped' : ''}" id="fcCard">
+        <div class="fc-card-inner">
+          <div class="fc-face">
+            <div class="fc-face-label">Chapter</div>
+            <div class="fc-face-title">${escapeHtml(card.chapterLabel)}</div>
+            <div class="fc-face-sub">Tap to reveal key points</div>
+          </div>
+          <div class="fc-face fc-face-back">
+            <div class="fc-face-label">Key points</div>
+            <ul>${card.points.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul>
+          </div>
+        </div>
+      </div>
+      <div class="fc-controls">
+        <button class="btn secondary small" id="fcPrev" ${flashcardState.idx === 0 ? 'disabled' : ''}>← Prev</button>
+        <button class="btn secondary small" id="fcFlip">Flip</button>
+        <button class="btn secondary small" id="fcNext" ${flashcardState.idx === flashcardState.cards.length - 1 ? 'disabled' : ''}>Next →</button>
+        <button class="btn secondary small" id="fcShuffle">🔀 Shuffle</button>
+      </div>
+      <div class="fc-hint">Click the card or "Flip" to see the summary points, then use Prev/Next to move through chapters.</div>
+    </div>
+  `;
+
+  const cardEl = document.getElementById('fcCard');
+  cardEl.addEventListener('click', () => { flashcardState.flipped = !flashcardState.flipped; renderFlashcard(); });
+  document.getElementById('fcFlip').addEventListener('click', (e) => { e.stopPropagation(); flashcardState.flipped = !flashcardState.flipped; renderFlashcard(); });
+  document.getElementById('fcPrev').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (flashcardState.idx > 0) { flashcardState.idx--; flashcardState.flipped = false; renderFlashcard(); }
+  });
+  document.getElementById('fcNext').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (flashcardState.idx < flashcardState.cards.length - 1) { flashcardState.idx++; flashcardState.flipped = false; renderFlashcard(); }
+  });
+  document.getElementById('fcShuffle').addEventListener('click', (e) => {
+    e.stopPropagation();
+    flashcardState.cards = shuffle(buildFlashcardDeck());
+    flashcardState.idx = 0;
+    flashcardState.flipped = false;
+    renderFlashcard();
+  });
+}
+
+document.getElementById('cheatsheetModeToggle').addEventListener('click', () => {
+  const listView = document.getElementById('cheatsheetContainer');
+  const cardView = document.getElementById('flashcardContainer');
+  const btn = document.getElementById('cheatsheetModeToggle');
+  const searchBox = document.getElementById('cheatsheetSearch');
+  const isFlash = cardView.style.display !== 'none';
+  if (isFlash) {
+    cardView.style.display = 'none';
+    listView.style.display = 'block';
+    searchBox.style.display = 'inline-block';
+    btn.textContent = '🔀 Flashcard mode';
+  } else {
+    listView.style.display = 'none';
+    cardView.style.display = 'block';
+    searchBox.style.display = 'none';
+    btn.textContent = '📖 List mode';
+    flashcardState = { cards: buildFlashcardDeck(), idx: 0, flipped: false };
+    renderFlashcard();
+  }
+});
+
 // ---------- Init ----------
 buildSetupUI();
+refreshWeakAreasCard();
 if (!GITHUB_DATA_URL) {
   const btn = document.getElementById('refreshGithubBtn');
   if (btn) btn.style.display = 'none';
