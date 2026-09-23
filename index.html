@@ -2116,8 +2116,10 @@ function renderStudyPlanTab() {
   const progress = loadStudyPlanProgress();
   const doneCount = STUDY_PLAN_DATA.filter((d, i) => progress[i]).length;
 
-  document.getElementById('studyPlanProgressLabel').textContent = `${doneCount} / ${STUDY_PLAN_DATA.length} days`;
-  document.getElementById('studyPlanProgressBar').style.width = `${Math.round((doneCount / STUDY_PLAN_DATA.length) * 100)}%`;
+  const progressPct = STUDY_PLAN_DATA.length ? Math.round((doneCount / STUDY_PLAN_DATA.length) * 100) : 0;
+  document.getElementById('studyPlanProgressLabel').textContent = `${doneCount} / ${STUDY_PLAN_DATA.length} days · ${progressPct}%`;
+  document.getElementById('studyPlanProgressBar').style.width = `${progressPct}%`;
+  document.getElementById('studyPlanProgressBar').setAttribute('aria-valuenow', String(progressPct));
 
   container.innerHTML = STUDY_PLAN_DATA.map((day, i) => {
     const isDone = !!progress[i];
@@ -2129,16 +2131,15 @@ function renderStudyPlanTab() {
         <div class="flex-between" style="flex-wrap:wrap; gap:10px;">
           <div style="flex:1; min-width:220px;">
             <div style="display:flex; align-items:center; gap:8px;">
-              <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
-                <input type="checkbox" class="spDayCheckbox" data-day="${i}" ${isDone ? 'checked' : ''}>
-                <strong>${day.label}: ${escapeHtml(day.title)}</strong>
-              </label>
+              <strong>${day.label}: ${escapeHtml(day.title)}</strong>
+              ${isDone ? '<span style="font-size:0.75rem; color:#22c55e; font-weight:700;">✓ Completed</span>' : ''}
             </div>
             <div style="color:var(--muted); font-size:0.8rem; margin:4px 0 2px;">${escapeHtml(chapterLabel)}</div>
             <div style="font-size:0.85rem; margin:6px 0 4px;">${escapeHtml(day.focus)}</div>
             <div style="color:var(--muted); font-size:0.78rem; font-style:italic;">${escapeHtml(day.note)}</div>
           </div>
           <div style="display:flex; flex-direction:column; gap:6px; min-width:150px;">
+            <button class="btn small spCompleteBtn" data-day="${i}">${isDone ? '↩ Mark incomplete' : '✓ Complete day'}</button>
             <button class="btn secondary small spStudyBtn" data-module="${day.module}">📖 Study notes</button>
             ${DETAILED_NOTES_DATA[day.module] ? `<button class="btn secondary small spFullNotesBtn" data-module="${day.module}">📄 Full notes</button>` : ''}
             <button class="btn small spQuizBtn" data-day="${i}">📝 Quiz me</button>
@@ -2148,10 +2149,11 @@ function renderStudyPlanTab() {
     `;
   }).join('');
 
-  container.querySelectorAll('.spDayCheckbox').forEach(cb => {
-    cb.addEventListener('change', () => {
+  container.querySelectorAll('.spCompleteBtn').forEach(btn => {
+    btn.addEventListener('click', () => {
       const p = loadStudyPlanProgress();
-      p[cb.dataset.day] = cb.checked;
+      const dayIndex = btn.dataset.day;
+      p[dayIndex] = !p[dayIndex];
       saveStudyPlanProgress(p);
       renderStudyPlanTab();
     });
