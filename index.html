@@ -81,6 +81,8 @@
   .opt-row input{margin-top:3px;}
   .opt-row.correct{background:rgba(34,197,94,0.15);border-color:var(--good);}
   .opt-row.incorrect{background:rgba(239,68,68,0.15);border-color:var(--bad);}
+  .explanation{margin-top:8px;padding:10px 12px;border-left:3px solid var(--accent2);background:rgba(99,102,241,0.12);border-radius:6px;font-size:0.88rem;line-height:1.5;white-space:pre-wrap;}
+  .explanation .exp-label{display:block;font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--accent2);margin-bottom:3px;}
   .badge{
     display:inline-block;padding:2px 9px;border-radius:999px;font-size:0.72rem;font-weight:600;
   }
@@ -316,7 +318,7 @@
       <p style="color:var(--muted); font-size:0.9rem; line-height:1.5;">
         Upload an .xlsx/.xls file with one question per row: <strong>Column A</strong> = chapter name,
         <strong>Column B</strong> = question text, <strong>Columns C–F</strong> = answer options A, B, C, and D
-        (in that order), and <strong>Column G</strong> = the letter (A/B/C/D) of the correct option. The first row
+        (in that order), and <strong>Column G</strong> = the letter (A/B/C/D) of the correct option. An optional <strong>Explanation</strong> column (the column right after Answer, e.g. Column I when a Module column is used) is shown with the correct answer after you submit a quiz. The first row
         is treated as a header and skipped. Rows are grouped into chapters based on the value in Column A (rows with
         the same chapter name become one chapter, in the order they first appear); a blank chapter cell falls back to
         a "General" chapter. If the workbook has multiple sheets, all sheets are read and combined the same way. Give
@@ -757,6 +759,7 @@ function getAllBankQuestions() {
           chapter: chKey,
           chapterTitle: chData.title,
           text: q.q,
+          explanation: q.explanation || '',
           options: letters.map(l => ({ text: q.options[l], isCorrect: l === q.answer_letter }))
         });
       });
@@ -834,6 +837,7 @@ function renderReviewQuestionCard(q) {
       <div class="q-meta">Module ${q.module} · Chapter ${q.chapter}: ${escapeHtml(q.chapterTitle)} ${dateStr ? '· ' + dateStr : ''}</div>
       <div class="q-title">${escapeHtml(q.text)} ${statusBadge}</div>
       ${optsHtml}
+      ${explanationHtml(q)}
     </div>
   `;
 }
@@ -1078,6 +1082,7 @@ document.getElementById('startQuizBtn').addEventListener('click', () => {
           chapter: chNum,
           chapterTitle: chData.title,
           text: q.q,
+          explanation: q.explanation || '',
           options: options // each {text, isCorrect}
         });
       });
@@ -1184,6 +1189,7 @@ function gradeAndShowResults() {
     chapter: q.chapter,
     chapterTitle: q.chapterTitle,
     text: q.text,
+    explanation: q.explanation || '',
     options: q.options, // [{text, isCorrect}]
     chosenIdx: chosenIdx === undefined ? null : chosenIdx,
     isCorrect
@@ -1252,6 +1258,17 @@ function renderResults(details, record) {
       block.appendChild(row);
     });
 
+    if (q.explanation && String(q.explanation).trim()) {
+      const exp = document.createElement('div');
+      exp.className = 'explanation';
+      const lbl = document.createElement('span');
+      lbl.className = 'exp-label';
+      lbl.textContent = 'Explanation';
+      exp.appendChild(lbl);
+      exp.appendChild(document.createTextNode(String(q.explanation).trim()));
+      block.appendChild(exp);
+    }
+
     container.appendChild(block);
   });
 }
@@ -1277,6 +1294,10 @@ function saveHistoryRecord(record) {
     console.error('Could not save history', e);
   }
 }
+function explanationHtml(q) {
+  const e = q && q.explanation ? String(q.explanation).trim() : '';
+  return e ? `<div class="explanation"><span class="exp-label">Explanation</span>${escapeHtml(e)}</div>` : '';
+}
 function escapeHtml(s) {
   const d = document.createElement('div');
   d.textContent = s;
@@ -1297,6 +1318,7 @@ function renderQuestionReview(q) {
       <div class="q-meta">Module ${q.module} · Chapter ${q.chapter}: ${escapeHtml(q.chapterTitle)}</div>
       <div class="q-title">${escapeHtml(q.text)}</div>
       ${optsHtml}
+      ${explanationHtml(q)}
     </div>
   `;
 }
@@ -1475,6 +1497,7 @@ function ingestParsedSets(parsed) {
 //
 // Supports two column layouts, detected from the header row of each sheet:
 //   7 columns: Chapter | Question | Option A-D | Answer      -> everything goes into `setName`
+//   Optional extra column "Explanation" (Column I in the 9-column layout) is shown with the correct answer in results.
 //   8 columns: Module | Chapter | Question | Option A-D | Answer -> rows are grouped into a
 //              separate set per distinct Module value (e.g. the "All Questions" tab produced
 //              by combining several quizzes), ignoring `setName` for those rows.
@@ -1514,6 +1537,7 @@ function ingestWorkbook(workbook, setName) {
     let cCol = findCol(headerRow, ['option c', 'c']);
     let dCol = findCol(headerRow, ['option d', 'd']);
     let ansCol = findCol(headerRow, ['correct answer', 'answer']);
+    let explCol = findCol(headerRow, ['explanation', 'explanations', 'rationale', 'answer explanation']);
 
     // Fall back to positional layout if header text wasn't recognized.
     const hasModuleCol = moduleCol !== -1;
@@ -1526,6 +1550,9 @@ function ingestWorkbook(workbook, setName) {
         [chapterCol, qCol, aCol, bCol, cCol, dCol, ansCol] = [0, 1, 2, 3, 4, 5, 6];
       }
     }
+    // Optional explanation: header named "Explanation", else the column right after Answer
+    // (Column I in the Module | Chapter | Question | A-D | Answer | Explanation layout).
+    if (explCol === -1) explCol = ansCol + 1;
 
     dataRows.forEach((row, rIdx) => {
       const q = row[qCol];
@@ -1566,7 +1593,8 @@ function ingestWorkbook(workbook, setName) {
           C: String(optC).trim(),
           D: String(optD).trim()
         },
-        answer_letter: answerLetter
+        answer_letter: answerLetter,
+        explanation: (row[explCol] === undefined || row[explCol] === null) ? '' : String(row[explCol]).trim()
       });
       totalQuestions += 1;
     });
@@ -1829,6 +1857,7 @@ document.getElementById('startWeakAreasBtn').addEventListener('click', () => {
     chapter: q.chapter,
     chapterTitle: q.chapterTitle,
     text: q.text,
+    explanation: q.explanation || '',
     options: q.options.map(o => ({ text: o.text, isCorrect: o.isCorrect }))
   })));
 
@@ -2046,6 +2075,7 @@ function getQuestionsForChapters(specs, perChapter) {
         chapter: chKey,
         chapterTitle: chData.title,
         text: q.q,
+          explanation: q.explanation || '',
         options: letters.map(l => ({ text: q.options[l], isCorrect: l === q.answer_letter }))
       }));
       qs = shuffle(qs);
